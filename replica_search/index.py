@@ -8,6 +8,7 @@ from sklearn.metrics.pairwise import pairwise_distances
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import Normalizer
 from sklearn.decomposition import PCA
+from sklearn.cluster import DBSCAN
 from h5py import File
 from time import time
 from threading import Lock
@@ -383,6 +384,14 @@ class IntegralImagesIndex:
 
         return sorted([(self.base_index_inds_to_uids[r[0]], self.base_index_inds_to_uids[r[1]], r[2]) for r in results],
                       key=lambda r: r[2])
+
+    def find_clusters(self, max_threshold=0.04, min_samples=3, n_jobs=10) -> List[List[str]]:
+        cluster_alg = DBSCAN(eps=max_threshold, min_samples=min_samples, n_jobs=n_jobs, metric='cosine', algorithm='brute')
+        clusters = cluster_alg.fit_predict(self.base_index_features)
+        results = []
+        for i in range(np.max(clusters)+1):
+            results.append(self.base_index_inds_to_uids[clusters == i])
+        return results
 
     def make_distance_matrix(self, uids):
         features = np.stack([self._get_feature(uid) for uid in uids])

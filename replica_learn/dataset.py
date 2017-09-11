@@ -47,6 +47,14 @@ class Dataset:
                     edgecolor="red", fill=False)
             )
 
+    def plot_imgs(self, uuids: List[str]):
+        plt.figure(figsize=(15, 15))
+        nb_results = len(uuids)
+        grid_size = np.ceil(np.sqrt(nb_results))
+        for i, uuid in enumerate(uuids):
+            plt.subplot(grid_size, grid_size, i+1)
+            self.plot_img(uuid)
+
     def plot_query(self, query, results, region=None):
         plt.figure(figsize=(15, 15))
         nb_results = len(results)
@@ -57,7 +65,6 @@ class Dataset:
         for i, res in enumerate(results):
             if region is not None:
                 t, s, r = res
-
             else:
                 t, s = res
                 r = None
