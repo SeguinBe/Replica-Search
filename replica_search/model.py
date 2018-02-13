@@ -2,7 +2,7 @@ from sqlalchemy import Column, String
 from sqlalchemy.ext.declarative import declarative_base
 
 from .resolvers import LOCAL_RESOLVERS
-from .sql_types import NpArrayType
+#from .sql_types import NpArrayType
 
 Base = declarative_base()
 
@@ -18,18 +18,18 @@ class ImageLocation(Base):
         return LOCAL_RESOLVERS[self.resolver_key].resolves(self.iiif_server_id)
 
 
-class RawFeature:
-    uid = Column(String(32), primary_key=True)
-    data = Column(NpArrayType)  # type: np.ndarray
-
-    def __repr__(self):
-        return "<{}(uid='{}', data_size={},{})>".format(self.__class__.__name__, self.uid, self.data.shape, self.data.dtype)
-
-
-class Feature_Test(Base, RawFeature):
-    __tablename__ = 'features'
-    uid = Column(String(32), primary_key=True)
-    data = Column(NpArrayType)  # type: np.ndarray
+# class RawFeature:
+#     uid = Column(String(32), primary_key=True)
+#     data = Column(NpArrayType)  # type: np.ndarray
+#
+#     def __repr__(self):
+#         return "<{}(uid='{}', data_size={},{})>".format(self.__class__.__name__, self.uid, self.data.shape, self.data.dtype)
+#
+#
+# class Feature_Test(Base, RawFeature):
+#     __tablename__ = 'features'
+#     uid = Column(String(32), primary_key=True)
+#     data = Column(NpArrayType)  # type: np.ndarray
 
 
 class QueryIterator:

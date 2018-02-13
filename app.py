@@ -3,7 +3,7 @@ import os
 import requests
 import sqlalchemy
 from sqlalchemy.pool import StaticPool
-from flask import Flask
+from flask import Flask, send_file
 from flask_restplus import Api, Resource
 from flask_caching import Cache
 from flask_prometheus import monitor
@@ -11,7 +11,8 @@ from sqlalchemy.orm import sessionmaker, scoped_session
 from werkzeug.exceptions import BadRequest
 import numpy as np
 
-from replica_search import model, resolvers, index
+from replica_search import model, resolvers, index, duplicates
+import io
 
 app = Flask(__name__)
 api = Api(app)
@@ -29,14 +30,25 @@ Session = scoped_session(sessionmaker(bind=engine))
 DEFAULT_LOCAL_IMAGES_FOLDER = '/scratch/benoit/replica_local_downloaded_images'
 DEFAULT_RESOLVER_KEY = 'default'
 resolvers.LOCAL_RESOLVERS['iiif_replica'] = resolvers.LocalResolver('dhlabsrv4.epfl.ch/iiif_replica',
-                                                                    '/mnt/homes/benoit/datasets/')
+                                                                    '/mnt/project_replica/datasets/')
 resolvers.LOCAL_RESOLVERS[DEFAULT_RESOLVER_KEY] = resolvers.DefaultResolver(DEFAULT_LOCAL_IMAGES_FOLDER)
 RESIZING_MAX_DIM = 1024
 
 for resolver in resolvers.LOCAL_RESOLVERS.values():
     assert os.path.exists(resolver.local_root_folder), resolver.local_root_folder
 
-search_index = None
+search_indexes = dict()
+DEFAULT_SEARCH_INDEX_KEY = 'default'
+DEFAULT_REGION_SEARCH_INDEX_KEY = DEFAULT_SEARCH_INDEX_KEY
+DEFAULT_ALGEBRAIC_SEARCH_INDEX_KEY = 'algebraic'
+
+
+def get_search_index(key, default_key=DEFAULT_SEARCH_INDEX_KEY) -> index.IntegralImagesIndex:
+    correct_key = key if key is not None else default_key
+    search_index = search_indexes[correct_key]
+    if not search_index:
+        raise BadRequest('Index not found for key {}'.format(correct_key))
+    return search_index
 
 
 @api.route('/api/element/<string:uid>')
@@ -102,6 +114,24 @@ class RegisterImageResource(Resource):
         session = Session()
 
 
+@api.route('/api/transition_gif/<string:uid1>/<string:uid2>')
+class TransitionGifResource(Resource):
+    def get(self, uid1, uid2):
+        session = Session()
+        img_loc1 = session.query(model.ImageLocation).filter(model.ImageLocation.uid == uid1).one()
+        img_loc2 = session.query(model.ImageLocation).filter(model.ImageLocation.uid == uid2).one()
+        img_path1 = img_loc1.get_image_path()
+        img_path2 = img_loc2.get_image_path()
+        file_handle = io.BytesIO()
+        duplicates.make_transition_gif(img_path1, img_path2, file_handle)
+        file_handle.seek(0)
+        return send_file(
+                     file_handle,
+                     attachment_filename='transition.gif',
+                     mimetype='image/gif'
+               )
+
+
 @api.route('/api/stats')
 class GlobalStatistics(Resource):
     def get(self):
@@ -122,21 +152,39 @@ class SearchResource(Resource):
     parser.add_argument('positive_image_uids', type=list, required=True, location='json')
     parser.add_argument('negative_image_uids', type=list, default=[], location='json')
     parser.add_argument('nb_results', type=int, default=100)
+    parser.add_argument('index', type=str, location='json')
+    parser.add_argument('filtered_uids', type=list, default=[], location='json')
+    parser.add_argument('rerank', type=bool, default=False, location='json')
 
     @api.expect(parser)
     def post(self):
         args = self.parser.parse_args()
-        if not algebraic_search_index:
-            raise BadRequest('No index is loaded')
 
         @cache.memoize(timeout=CACHE_SEARCH_TIMEOUT, make_name='search')
         def _fn(args):
-            results = algebraic_search_index.search(args['positive_image_uids'], args['negative_image_uids'], args['nb_results'])
-            return {
+            search_index = get_search_index(args['index'], DEFAULT_ALGEBRAIC_SEARCH_INDEX_KEY)
+            if len(args['positive_image_uids']) == 0:
+                return {'results': []}
+            results = search_index.search(args['positive_image_uids'], args['negative_image_uids'],
+                                      args['nb_results'], args['filtered_uids'])
+            if len(args['positive_image_uids']) == 1 and len(args['negative_image_uids'])==0 and args['rerank']:
+                integral_index = get_search_index(args['index'], DEFAULT_REGION_SEARCH_INDEX_KEY)
+                results = integral_index.search_with_cnn_reranking(args['positive_image_uids'][0],
+                                                                   args['nb_results'],
+                                                                   filtered_ids=args['filtered_uids'],
+                                                                   candidates=[r[0] for r in results])
+                return {
                 'results': [
-                    {'uid': uid, 'score': s} for uid, s in results
+                    {'uid': uid, 'score': s, 'box': {k: v for k, v in zip(['y', 'x', 'h', 'w'], box)}}
+                    for uid, s, box in results
                     ]
-            }
+                }
+            else:
+                return {
+                    'results': [
+                        {'uid': uid, 'score': s} for uid, s in results
+                        ]
+                }
         return _fn(args)
 
 
@@ -149,18 +197,20 @@ class SearchResource(Resource):
     parser.add_argument('box_h', type=float, required=True, location='json')
     parser.add_argument('box_w', type=float, required=True, location='json')
     parser.add_argument('nb_results', type=int, default=100)
+    parser.add_argument('index', type=str, default=DEFAULT_REGION_SEARCH_INDEX_KEY, location='json')
+    parser.add_argument('filtered_uids', type=list, default=[], location='json')
 
     @api.expect(parser)
     def post(self):
         args = self.parser.parse_args()
-        if not search_index:
-            raise BadRequest('No index is loaded')
 
         @cache.memoize(timeout=CACHE_SEARCH_TIMEOUT, make_name='search_region')
         def _fn(args):
+            search_index = get_search_index(args['index'], DEFAULT_REGION_SEARCH_INDEX_KEY)
             results = search_index.search_region(args['image_uid'],
                                                  np.array([args['box_y'], args['box_x'], args['box_h'], args['box_w']]),
-                                                 args['nb_results'])
+                                                 args['nb_results'],
+                                                 filtered_ids=args['filtered_uids'])
             return {
                 'results': [
                     {'uid': uid, 'score': s, 'box': {k: v for k, v in zip(['y', 'x', 'h', 'w'], box)}}
@@ -175,23 +225,28 @@ class SearchResource(Resource):
 class SearchResource(Resource):
     parser = api.parser()
     parser.add_argument('image_uids', type=list, required=True, location='json')
+    parser.add_argument('index', type=str, location='json')
 
     @api.expect(parser)
     def post(self):
         args = self.parser.parse_args()
-        if not search_index:
-            raise BadRequest('No index is loaded')
+        #print(args)
+        search_index = get_search_index(args['index'], DEFAULT_ALGEBRAIC_SEARCH_INDEX_KEY)
 
-        distance_matrix = algebraic_search_index.make_distance_matrix(args['image_uids'])
+        distance_matrix = search_index.make_distance_matrix(args['image_uids'])
 
         return {'distances': distance_matrix.round(3).tolist()}
 
 
 if __name__ == '__main__':
-    algebraic_search_index = index.IntegralImagesIndex('/home/seguin/resnet_index.hdf5',
+    search_indexes[DEFAULT_ALGEBRAIC_SEARCH_INDEX_KEY] = index.IntegralImagesIndex('/home/seguin/resnet_index_total.hdf5',
                                                        index.IntegralImagesIndex.IndexType.HALF_DIM_PCA)
-    print('Initialized : {}'.format(algebraic_search_index))
-    search_index = index.IntegralImagesIndex('/home/seguin/vgg_320_aug_triplet.hdf5')
-    print('Initialized : {}'.format(search_index))
-    monitor(app, port=5011)
-    app.run(host='0.0.0.0', debug=True, threaded=True, port=5001)
+    search_indexes[DEFAULT_SEARCH_INDEX_KEY] = index.IntegralImagesIndex('/home/seguin/vgg_index_total.hdf5')
+
+    #search_indexes['untrained'] = index.IntegralImagesIndex('/home/seguin/resnet_index_untrained.hdf5')
+    #for exp_name in ['canaletto_guardi', 'tiziano', 'allegory', 'diana']:
+    #    search_indexes[exp_name] = index.IntegralImagesIndex('/home/seguin/experiment_{}_index.hdf5'.format(exp_name))
+    for k, v in search_indexes.items():
+        print('Initialized "{}" : {}'.format(k, v))
+    #monitor(app, port=5011)
+    app.run(host='0.0.0.0', debug=False, threaded=True, port=5001)

@@ -1,4 +1,7 @@
-import blosc
+try:
+    import blosc
+except:
+    pass
 import numpy as np
 import numba
 import pickle

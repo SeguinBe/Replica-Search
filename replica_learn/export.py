@@ -3,6 +3,7 @@ import tensorflow as tf
 import os
 from threading import Thread
 from tqdm import tqdm
+from glob import glob
 
 ENQUEUE_FILENAMES_KEY = 'enqueue_filenames'
 DEQUEUE_OUTPUT_KEY = 'dequeue_output'
@@ -31,7 +32,9 @@ def _make_graph(estimator, preprocess_function):
         estimator_spec = estimator._call_model_fn(
             features=input_features,
             labels=None,
-            mode=tf.estimator.ModeKeys.PREDICT)
+            mode=tf.estimator.ModeKeys.PREDICT,
+            config=tf.estimator.RunConfig()
+        )
         output = estimator_spec.predictions
 
         # Build the SignatureDefs from receivers and all outputs
@@ -72,7 +75,9 @@ def _make_streaming_graph(estimator, preprocess_function, batch_size=16, num_pre
         estimator_spec = estimator._call_model_fn(
             features=input_features,
             labels=None,
-            mode=tf.estimator.ModeKeys.PREDICT)
+            mode=tf.estimator.ModeKeys.PREDICT,
+            config=tf.estimator.RunConfig()
+        )
         output = estimator_spec.predictions
 
         with tf.control_dependencies([queue.enqueue_many([enqueue_filenames, enqueue_uids])]):
@@ -108,7 +113,8 @@ def _make_streaming_graph(estimator, preprocess_function, batch_size=16, num_pre
     return g, signature_def_map, estimator_spec
 
 
-def export_estimator(estimator, export_dir_base, preprocess_function, checkpoint_path=None):
+def export_estimator(estimator, export_dir_base, preprocess_function, checkpoint_path=None,
+                     streaming=True):
 
     if not checkpoint_path:
         # Locate the latest checkpoint
@@ -150,7 +156,15 @@ def export_estimator(estimator, export_dir_base, preprocess_function, checkpoint
 class LoadedModel:
     def __init__(self, config: tf.ConfigProto, model_dir: str):
         self.config = config
-        self.model_dir = model_dir
+        elements_in_folder = os.listdir(model_dir)
+        if 'saved_model.pb' not in elements_in_folder:
+            elements_in_folder = [e for e in elements_in_folder if e.isdigit()]
+            export_choice = sorted(elements_in_folder, key=int)[-1]
+            print('Taking most recent model : {}'.format(export_choice))
+            self.model_dir = os.path.join(model_dir, export_choice)
+            assert 'saved_model.pb' in os.listdir(self.model_dir)
+        else:
+            self.model_dir = model_dir
         self.sess = None
 
     def __enter__(self):
@@ -169,7 +183,15 @@ class LoadedModel:
 class StreamingModel:
     def __init__(self, config: tf.ConfigProto, model_dir: str):
         self.config = config
-        self.model_dir = model_dir
+        elements_in_folder = os.listdir(model_dir)
+        if 'saved_model.pb' not in elements_in_folder:
+            elements_in_folder = [e for e in elements_in_folder if e.isdigit()]
+            export_choice = sorted(elements_in_folder, key=int)[-1]
+            print('Taking most recent model : {}'.format(export_choice))
+            self.model_dir = os.path.join(model_dir, export_choice)
+            assert 'saved_model.pb' in os.listdir(self.model_dir)
+        else:
+            self.model_dir = model_dir
         self.sess = None
 
     def __enter__(self):
@@ -191,7 +213,10 @@ class StreamingModel:
         def enqueueing_fn():
             try:
                 for uid, path in elements:
-                    self.enqueue(uid, path)
+                    if path is not None:
+                        self.enqueue(uid, path)
+                    elif uid is not None:
+                        print("Warning: missing path for {}".format(uid))
             except Exception as e:
                 print(e)
             finally:

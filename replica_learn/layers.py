@@ -8,7 +8,8 @@ def global_pool_layer(feature_maps, shapes, pooling_method: str, normalize_outpu
     reducing_op = {
         'max': tf.reduce_max,
         'sum': tf.reduce_sum,
-        'avg': tf.reduce_mean
+        'avg': tf.reduce_mean,
+        'generalized_mean': tf.reduce_mean
     }
 
     # Compute the pooling ratio
@@ -17,9 +18,16 @@ def global_pool_layer(feature_maps, shapes, pooling_method: str, normalize_outpu
         def _fn(_in):
             feature_map, shape = _in
             return reducing_op[pooling_method](feature_map[:shape[0], :shape[1]], axis=[0, 1])
+        if pooling_method == 'generalized_mean':
+            p = tf.get_variable('generalized_mean_p', shape=(), initializer=tf.initializers.constant(2.0),
+                                trainable=False)  # TODO training does not work for now
+            tf.summary.scalar('Generalized_mean_p', p)
+            feature_maps = tf.pow(feature_maps, p)
         global_pool = tf.map_fn(_fn,
                                 (feature_maps, shapes), dtype=tf.float32)
         global_pool.set_shape(feature_maps.get_shape()[0:1].concatenate(feature_maps.get_shape()[3:]))
+        if pooling_method == 'generalized_mean':
+            global_pool = tf.pow(global_pool, 1.0/p)
 
     if normalize_output:
         # Normalization of the output
