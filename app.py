@@ -18,11 +18,13 @@ import base64
 app = Flask(__name__)
 api = Api(app)
 
+app.config.from_object('config')
+
 cache = Cache(app, config={'CACHE_TYPE': 'simple'})
 
 CACHE_SEARCH_TIMEOUT = 120  # Seconds
 
-engine = sqlalchemy.create_engine('sqlite:////home/seguin/Replica-search/sqlalchemy.db',
+engine = sqlalchemy.create_engine('sqlite:///' + app.config['SQLITE_FILE'],
                                   connect_args={'check_same_thread': False},
                                   poolclass=StaticPool)
 model.Base.metadata.create_all(engine)
@@ -30,8 +32,9 @@ Session = scoped_session(sessionmaker(bind=engine))
 
 DEFAULT_LOCAL_IMAGES_FOLDER = '/scratch/benoit/replica_local_downloaded_images'
 DEFAULT_RESOLVER_KEY = 'default'
-resolvers.LOCAL_RESOLVERS['iiif_replica'] = resolvers.LocalResolver('dhlabsrv4.epfl.ch/iiif_replica',
-                                                                    '/mnt/project_replica/datasets/')
+
+for resolver_key, base_url, local_root_folder in app.config['LOCAL_RESOLVERS']:
+    resolvers.LOCAL_RESOLVERS[resolver_key] = resolvers.LocalResolver(base_url, local_root_folder)
 resolvers.LOCAL_RESOLVERS[DEFAULT_RESOLVER_KEY] = resolvers.DefaultResolver(DEFAULT_LOCAL_IMAGES_FOLDER)
 RESIZING_MAX_DIM = 1024
 
@@ -296,10 +299,8 @@ class SearchResource(Resource):
 
 
 if __name__ == '__main__':
-    search_indexes[DEFAULT_ALGEBRAIC_SEARCH_INDEX_KEY] = index.IntegralImagesIndex(
-        '/home/seguin/resnet_index_total.hdf5',
-        index.IntegralImagesIndex.IndexType.HALF_DIM_PCA)
-    search_indexes[DEFAULT_SEARCH_INDEX_KEY] = index.IntegralImagesIndex('/home/seguin/vgg_index_total.hdf5')
+    for search_index_key, filename, index_key in app.config['SEARCH_INDEXES']:
+        search_indexes[search_index_key] = index.IntegralImagesIndex(filename, index_key)
 
     # search_indexes['untrained'] = index.IntegralImagesIndex('/home/seguin/resnet_index_untrained.hdf5')
     # for exp_name in ['canaletto_guardi', 'tiziano', 'allegory', 'diana']:
