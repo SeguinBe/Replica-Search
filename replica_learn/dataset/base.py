@@ -1,4 +1,4 @@
-from typing import Dict, List, Tuple, Union
+from typing import Dict, List, Tuple, Union, Optional
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 import numpy as np
@@ -7,13 +7,14 @@ from PIL import Image
 import cv2
 
 try:
-    from pylatex import Document, Section, Tabular, StandAloneGraphic, NoEscape, NewLine, HFill
+    from pylatex import Document, Section, Tabular, StandAloneGraphic, NoEscape, NewLine, HFill, Package
 except:
     pass
 import networkx as nx
 from tqdm import tqdm
 import pandas as pd
-from scipy.misc import imread
+from scipy.misc import imread, imresize, imsave
+import os
 
 
 class Dataset:
@@ -122,6 +123,69 @@ class Dataset:
             draw_pairs_tables(neg_pairs)
 
         doc.generate_pdf(filename)
+
+    def pdf_export_groups(self, groups, filename, tmp_dir='/tmp/replica_tmp', split_files_into: Optional[int]=None,
+                          labels: Optional[Dict[str, str]]=None, links: Optional[Dict[str, str]]=None):
+        def _generate_one_file(groups, filename):
+            geometry_options = {"rmargin": "1cm", "lmargin": "1cm"}
+            doc = Document(geometry_options=geometry_options)
+            doc.packages.append(Package('hyperref'))
+
+            os.makedirs(tmp_dir, exist_ok=True)
+            desired_size = 600 * 400
+
+            def get_resized_img_path(uid):
+                p = os.path.join(tmp_dir, '{}.jpg'.format(uid))
+                if os.path.exists(p):
+                    return p
+                img = self.get_img(uid)
+                s = np.array(img.shape[:2])
+                s = np.round(s * np.sqrt(desired_size / np.prod(s))).astype(np.int32)
+                img = imresize(img, s)
+                imsave(p, img)
+                return p
+
+            def draw_set(uid_set):
+                #if len(uid_set) == 2 and False:
+                #    l = core_server.model.VisualLink.get_from_images(*list(uid_set))
+                #    if l is not None:
+                #        doc.append('Already present : {}'.format(l.type))
+                with doc.create(Tabular('|' + 'p{4.5cm}|' * len(uid_set))) as table:
+                    table.add_hline()
+                    # print(StandAloneGraphic(path_dict[uid],
+                    # image_options=NoEscape(r'width=0.12\textwidth')) for uid in uid_set))
+                    table.add_row([StandAloneGraphic(get_resized_img_path(uid),
+                                                     image_options=NoEscape(r'width=4cm')) for uid in uid_set])
+                    table.add_hline()
+                    if labels is not None:
+                        table.add_row([labels[uid] for uid in uid_set])
+                        table.add_hline()
+                    if links is not None:
+                        filter_if_no_link = lambda s: NoEscape(r'\href{{{}}}{{link}}'.format(s)) if s else ""
+                        table.add_row([filter_if_no_link(links[uid]) for uid in uid_set])
+                        table.add_hline()
+
+            n_elements = 0
+            max_per_line = 4
+            for uid_set in tqdm(groups):
+                # if len(uid_set)+n_elements>max_per_line:
+                #    n_elements = 0
+                #    doc.append(NewLine())
+                # else:
+                #    doc.append(HFill())
+                for i in range(0, len(uid_set), max_per_line):
+                    draw_set(list(uid_set)[i:i + max_per_line])
+                    doc.append(NewLine())
+                doc.append(NewLine())
+                n_elements += len(uid_set)
+            doc.generate_pdf(filename)
+
+        if split_files_into is not None:
+            for i in tqdm(range(0, len(groups), split_files_into)):
+                _generate_one_file(groups[i:i + split_files_into],
+                              '{}_{:04d}-{:04d}'.format(filename, i, min(i + split_files_into - 1, len(groups))))
+        else:
+            _generate_one_file(groups, filename)
 
     @staticmethod
     def export_pairs(json_filename: str, pairs: List[Tuple]):

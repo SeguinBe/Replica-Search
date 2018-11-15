@@ -13,6 +13,7 @@ import numpy as np
 
 from replica_search import model, resolvers, index, duplicates
 import io
+import base64
 
 app = Flask(__name__)
 api = Api(app)
@@ -126,10 +127,22 @@ class TransitionGifResource(Resource):
         duplicates.make_transition_gif(img_path1, img_path2, file_handle)
         file_handle.seek(0)
         return send_file(
-                     file_handle,
-                     attachment_filename='transition.gif',
-                     mimetype='image/gif'
-               )
+            file_handle,
+            attachment_filename='transition.gif',
+            mimetype='image/gif'
+        )
+
+
+@api.route('/api/transition_gif_validity/<string:uid1>/<string:uid2>')
+class TransitionGifResource(Resource):
+    def get(self, uid1, uid2):
+        session = Session()
+        img_loc1 = session.query(model.ImageLocation).filter(model.ImageLocation.uid == uid1).one()
+        img_loc2 = session.query(model.ImageLocation).filter(model.ImageLocation.uid == uid2).one()
+        img_path1 = img_loc1.get_image_path()
+        img_path2 = img_loc2.get_image_path()
+        is_valid = duplicates.is_transition_valid(img_path1, img_path2)
+        return {"valid": is_valid}
 
 
 @api.route('/api/stats')
@@ -160,31 +173,73 @@ class SearchResource(Resource):
     def post(self):
         args = self.parser.parse_args()
 
+        print(args)
+
         @cache.memoize(timeout=CACHE_SEARCH_TIMEOUT, make_name='search')
         def _fn(args):
             search_index = get_search_index(args['index'], DEFAULT_ALGEBRAIC_SEARCH_INDEX_KEY)
             if len(args['positive_image_uids']) == 0:
-                return {'results': []}
-            results = search_index.search(args['positive_image_uids'], args['negative_image_uids'],
-                                      args['nb_results'], args['filtered_uids'])
-            if len(args['positive_image_uids']) == 1 and len(args['negative_image_uids'])==0 and args['rerank']:
+                return {'results': [], 'total': search_index.get_number_of_images()}
+
+            if len(args['positive_image_uids']) == 1 and len(args['negative_image_uids']) == 0 and args['rerank']:
+                results = search_index.search(args['positive_image_uids'],
+                                              args['negative_image_uids'],
+                                              max(1000, args['nb_results']),
+                                              args['filtered_uids'])
                 integral_index = get_search_index(args['index'], DEFAULT_REGION_SEARCH_INDEX_KEY)
                 results = integral_index.search_with_cnn_reranking(args['positive_image_uids'][0],
                                                                    args['nb_results'],
                                                                    filtered_ids=args['filtered_uids'],
                                                                    candidates=[r[0] for r in results])
                 return {
-                'results': [
-                    {'uid': uid, 'score': s, 'box': {k: v for k, v in zip(['y', 'x', 'h', 'w'], box)}}
-                    for uid, s, box in results
-                    ]
+                    'results': [
+                        {'uid': uid, 'score': s, 'box': {k: v for k, v in zip(['y', 'x', 'h', 'w'], box)}}
+                        for uid, s, box in results
+                        ],
+                    'total': len(args['filtered_uids']) if args['filtered_uids']
+                    else integral_index.get_number_of_images()
                 }
             else:
+                results = search_index.search(args['positive_image_uids'], args['negative_image_uids'],
+                                              args['nb_results'], args['filtered_uids'])
                 return {
                     'results': [
                         {'uid': uid, 'score': s} for uid, s in results
-                        ]
+                        ],
+                    'total': len(args['filtered_uids']) if args['filtered_uids']
+                    else search_index.get_number_of_images()
                 }
+
+        return _fn(args)
+
+
+@api.route('/api/search_external')
+class SearchResource(Resource):
+    parser = api.parser()
+    parser.add_argument('image_b64', type=str, required=True, location='json')
+    parser.add_argument('nb_results', type=int, default=100)
+    parser.add_argument('filtered_uids', type=list, default=[], location='json')
+    parser.add_argument('rerank', type=bool, default=False, location='json')
+
+    @api.expect(parser)
+    def post(self):
+        args = self.parser.parse_args()
+
+        def _fn(args):
+            search_index = get_search_index(DEFAULT_ALGEBRAIC_SEARCH_INDEX_KEY)
+            # Decompress image
+            image_b64 = args['image_b64'].encode()  # type: bytes
+            image_bytes = base64.urlsafe_b64decode(image_b64)
+            # Search
+            results = search_index.search_from_image(image_bytes, args['nb_results'], args['filtered_uids'])
+            return {
+                'results': [
+                    {'uid': uid, 'score': s} for uid, s in results
+                    ],
+                'total': len(args['filtered_uids']) if args['filtered_uids']
+                else search_index.get_number_of_images()
+            }
+
         return _fn(args)
 
 
@@ -215,7 +270,9 @@ class SearchResource(Resource):
                 'results': [
                     {'uid': uid, 'score': s, 'box': {k: v for k, v in zip(['y', 'x', 'h', 'w'], box)}}
                     for uid, s, box in results
-                    ]
+                    ],
+                'total': len(args['filtered_uids']) if args['filtered_uids']
+                else search_index.get_number_of_images()
             }
 
         return _fn(args)
@@ -230,7 +287,7 @@ class SearchResource(Resource):
     @api.expect(parser)
     def post(self):
         args = self.parser.parse_args()
-        #print(args)
+        # print(args)
         search_index = get_search_index(args['index'], DEFAULT_ALGEBRAIC_SEARCH_INDEX_KEY)
 
         distance_matrix = search_index.make_distance_matrix(args['image_uids'])
@@ -239,14 +296,15 @@ class SearchResource(Resource):
 
 
 if __name__ == '__main__':
-    search_indexes[DEFAULT_ALGEBRAIC_SEARCH_INDEX_KEY] = index.IntegralImagesIndex('/home/seguin/resnet_index_total.hdf5',
-                                                       index.IntegralImagesIndex.IndexType.HALF_DIM_PCA)
+    search_indexes[DEFAULT_ALGEBRAIC_SEARCH_INDEX_KEY] = index.IntegralImagesIndex(
+        '/home/seguin/resnet_index_total.hdf5',
+        index.IntegralImagesIndex.IndexType.HALF_DIM_PCA)
     search_indexes[DEFAULT_SEARCH_INDEX_KEY] = index.IntegralImagesIndex('/home/seguin/vgg_index_total.hdf5')
 
-    #search_indexes['untrained'] = index.IntegralImagesIndex('/home/seguin/resnet_index_untrained.hdf5')
-    #for exp_name in ['canaletto_guardi', 'tiziano', 'allegory', 'diana']:
+    # search_indexes['untrained'] = index.IntegralImagesIndex('/home/seguin/resnet_index_untrained.hdf5')
+    # for exp_name in ['canaletto_guardi', 'tiziano', 'allegory', 'diana']:
     #    search_indexes[exp_name] = index.IntegralImagesIndex('/home/seguin/experiment_{}_index.hdf5'.format(exp_name))
     for k, v in search_indexes.items():
         print('Initialized "{}" : {}'.format(k, v))
-    #monitor(app, port=5011)
+    # monitor(app, port=5011)
     app.run(host='0.0.0.0', debug=False, threaded=True, port=5001)

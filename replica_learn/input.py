@@ -177,8 +177,6 @@ def input_triplets_from_csv(csv_filename, img_preprocessing_fn, batch_size=8, nu
                                # min_after_dequeue=batch_size * 3,
                                allow_smaller_final_batch=True)
 
-
-
         return batch, None
 
     return input_fn
@@ -248,7 +246,7 @@ def data_augmentation_fn(lr_flip=True, rotation=True, zoom=True, color=True):
             if lr_flip:
                 img_tensor = tf.image.random_flip_left_right(img_tensor)
             if zoom:
-                img_tensor = random_zoom(img_tensor, max_zoom=0.15)
+                img_tensor = random_zoom(img_tensor, max_zoom=0.1)
             if rotation:
                 img_tensor = random_rotation(img_tensor)
             # img_tensor = tf.image.random_brightness(img_tensor, max_delta=10)  # Tends to saturate the image

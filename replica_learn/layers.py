@@ -12,6 +12,10 @@ def global_pool_layer(feature_maps, shapes, pooling_method: str, normalize_outpu
         'generalized_mean': tf.reduce_mean
     }
 
+    if isinstance(pooling_method, (float, int)):
+        p = pooling_method
+        pooling_method = 'generalized_mean'
+
     # Compute the pooling ratio
     with tf.name_scope('Global{}Pool'.format(pooling_method.capitalize())):
         # Spatial pooling for each image
@@ -19,9 +23,9 @@ def global_pool_layer(feature_maps, shapes, pooling_method: str, normalize_outpu
             feature_map, shape = _in
             return reducing_op[pooling_method](feature_map[:shape[0], :shape[1]], axis=[0, 1])
         if pooling_method == 'generalized_mean':
-            p = tf.get_variable('generalized_mean_p', shape=(), initializer=tf.initializers.constant(2.0),
-                                trainable=False)  # TODO training does not work for now
-            tf.summary.scalar('Generalized_mean_p', p)
+            #p = tf.get_variable('generalized_mean_p', shape=(), initializer=tf.initializers.constant(2.0),
+            #                    trainable=False)  # TODO training does not work for now
+            #tf.summary.scalar('Generalized_mean_p', p)
             feature_maps = tf.pow(feature_maps, p)
         global_pool = tf.map_fn(_fn,
                                 (feature_maps, shapes), dtype=tf.float32)

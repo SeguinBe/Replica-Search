@@ -52,17 +52,30 @@ def delta_decoding(shape, d_inds, values):
     return result
 
 
-def compress_sparse_data(f_map):
+def compress_sparse_data(f_map, use_blosc=True):
     assert f_map.dtype == np.float32
     # Find sparse elements
     shape, d_inds, values = delta_encoding(f_map)
     # Quantize
     values, _min, _max = quantize_array(values)
-    return pickle.dumps((f_map.shape, d_inds, values, _min, _max))
+    if use_blosc:
+        compress_fn = lambda arr: blosc.pack_array(arr, shuffle=blosc.SHUFFLE, clevel=9, cname='zstd')
+        return pickle.dumps((f_map.shape, compress_fn(d_inds), compress_fn(values), _min, _max, True))
+    else:
+        return pickle.dumps((f_map.shape, d_inds, values, _min, _max, False))
 
 
 def decompress_sparse_data(data):
-    shape, d_inds, values, _min, _max = pickle.loads(data)
+    compressed_data = pickle.loads(data)
+    if len(compressed_data) == 5:
+        shape, d_inds, values, _min, _max = compressed_data
+        blosc_used = False
+    else:
+        shape, d_inds, values, _min, _max, blosc_used = compressed_data
+    if blosc_used:
+        # Decompress
+        decompress_fn = lambda d: blosc.unpack_array(d)
+        d_inds, values, = decompress_fn(d_inds), decompress_fn(values)
     # Dequantize data
     values = dequantize_array(values, _min, _max)
     return delta_decoding(shape, d_inds, values)

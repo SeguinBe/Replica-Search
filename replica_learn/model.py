@@ -10,7 +10,7 @@ def full_model_fn(params):
         base_model_fn = {
             'vgg16': lambda _in: vgg_16_fn(_in, weight_decay=0.0001, blocks=params['blocks']),
             'resnet50': lambda _in: resnet_v1_50_fn(_in, is_training and params['train_batch_norm'],
-                                                    blocks=params['blocks']),
+                                                    blocks=params['blocks'], weight_decay=params['weight_decay']),
             'xception': lambda _in: xception_fn(_in, is_training=is_training and params['train_batch_norm'],
                                                 blocks=params['blocks']),
             'xception_fused': lambda _in: xception_fn(_in, batch_norm=False,
@@ -153,10 +153,10 @@ def model_fn(features, labels, mode, params):
             pretrained_restorer.restore(session, params['pretrained_file'])
 
         # TODO Understand why that poses problems
-        # ema = tf.train.ExponentialMovingAverage(0.95)
-        # tf.add_to_collection(tf.GraphKeys.UPDATE_OPS, ema.apply([loss]))
-        # ema_loss = ema.average(loss)
-        # tf.summary.scalar('losses/loss', ema_loss)
+        #ema = tf.train.ExponentialMovingAverage(0.95)
+        #tf.add_to_collection(tf.GraphKeys.UPDATE_OPS, ema.apply([loss]))
+        #ema_loss = ema.average(loss)
+        #tf.summary.scalar('losses/loss_ema', ema_loss)
 
         regularization_loss = tf.losses.get_regularization_loss()
         total_loss = loss + regularization_loss

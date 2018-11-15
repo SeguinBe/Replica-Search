@@ -15,95 +15,22 @@ from time import time
 from threading import Lock
 from tqdm import tqdm, tqdm_notebook
 import nmslib
-from scipy.spatial import distance
-from sklearn.linear_model import RANSACRegressor
 import cv2
-from functools import partial
+from functools import partial, lru_cache
+import pickle
 
 from .compression import compress_sparse_data, decompress_sparse_data
+from .utils import Timer
+from .match import match_feature_maps
+
+from replica_learn.export import LoadedModel
+import tensorflow as tf
 
 """@numba.jit(nogil=True)
 def make_integral_image(feat_map):
     result = np.zeros((feat_map.shape[0]+1, feat_map.shape[1] + 1, feat_map.shape[2]), dtype=np.float64)
     result[1:, 1:, :] = np.cumsum(np.cumsum(feat_map, axis=1), axis=0)
     return result"""
-
-
-def match_feature_maps(f_map_1, f_map_2, norm_epsilon=0, margin=1, crosscheck_limit=2, ransac_max_trials=100):
-    f_map_1 /= np.linalg.norm(f_map_1, axis=-1, keepdims=True) + norm_epsilon
-    h1, w1, d_size = f_map_1.shape
-
-    f_map_2 /= np.linalg.norm(f_map_2, axis=-1, keepdims=True) + norm_epsilon
-    h2, w2, _ = f_map_2.shape
-    # Convert to descriptors, keypoint versions
-    des1 = f_map_1[margin:h1 - margin, margin:w1 - margin].reshape((-1, d_size))
-    des2 = f_map_2[margin:h2 - margin, margin:w2 - margin].reshape((-1, d_size))
-    kp1 = np.stack(np.unravel_index(np.arange(len(des1)), (h1 - 2 * margin, w1 - 2 * margin)),
-                   axis=1) + 0.5 + margin
-    kp2 = np.stack(np.unravel_index(np.arange(len(des2)), (h2 - 2 * margin, w2 - 2 * margin)),
-                   axis=1) + 0.5 + margin
-
-    if False:
-        # Lowe ratio test
-        matcher = cv2.BFMatcher(crossCheck=False)
-        matches = matcher.knnMatch(des1, des2, k=2)
-        good = []
-        for m, n in matches:
-            if m.distance < 0.9 * n.distance:
-                good.append(m)
-    else:
-        d = distance.cdist(des1, des2)
-        best_1 = np.argsort(d, axis=1)[:, :crosscheck_limit]
-        best_2 = np.argsort(d.T, axis=1)[:, :crosscheck_limit]
-        best_1 = [set(s) for s in best_1]
-        best_2 = [set(s) for s in best_2]
-        # d = des1 @ des2.T
-        # best_1 = np.argmax(d, axis=1)
-        # best_2 = np.argmax(d, axis=0)
-        good = [(i, j) for i, s in enumerate(best_1) for j in s if i in best_2[j]]
-        # Slower and unclear how the crosscheck is performed
-        # matcher = cv2.BFMatcher(normType=cv2.NORM_L2, crossCheck=True)
-        # good = [((m.queryIdx, m.trainIdx)) for m in matcher.match(des1, des2)]
-    try:
-        src_pts = np.float32([kp1[m] for m, _ in good])
-        dst_pts = np.float32([kp2[m] for _, m in good])
-
-        def is_model_valid(model, X, y):
-            m = model.coef_
-            # no vertical flipping
-            if m[0, 0] < 0:
-                return False
-            m_abs = np.abs(m)
-            # scale
-            if np.abs(np.log((m_abs[0, 0]+0.001) / (m_abs[1, 1]+0.001))) > np.log(1.4):
-                return False
-            # small rotation/shearing
-            s = (m_abs[0, 0] + m_abs[1, 1]) / 2
-            if max(m_abs[1, 0], m_abs[0, 1]) > 0.2 * s:
-                return False
-            return True
-
-        regressor = RANSACRegressor(residual_threshold=1.0, max_trials=ransac_max_trials, min_samples=6,
-                                    is_model_valid=is_model_valid)
-        regressor.fit(src_pts, dst_pts)
-        mask = regressor.inlier_mask_
-        num_matches = int(np.sum(mask))
-
-        matchesMask = mask.tolist()
-        m1 = np.min(src_pts[mask], axis=0)
-        m2 = np.max(src_pts[mask], axis=0)
-        box1 = ((m1[0]-0.5)/h1, (m1[1]-0.5)/w1, (m2[0]-m1[0]+1)/h1, (m2[1]-m1[1]+1)/w1)
-        m1 = np.min(dst_pts[mask], axis=0)
-        m2 = np.max(dst_pts[mask], axis=0)
-        box2 = ((m1[0]-0.5)/h2, (m1[1]-0.5)/w2, (m2[0]-m1[0]+1)/h2, (m2[1]-m1[1]+1)/w2)
-    except ValueError:
-        matchesMask = [True] * len(good)
-        num_matches = 0
-        regressor = None
-        box1 = [0.0, 0.0, 1.0, 1.0]
-        box2 = box1
-
-    return num_matches, regressor, matchesMask, (box1, box2)
 
 
 ALPHA = 1.
@@ -278,6 +205,7 @@ class IntegralImagesIndex:
         print('Reading {}'.format(data_filename))
         self.data_filename = data_filename
         data_file = File(data_filename, mode='r')
+        self.saved_model_file = data_file.attrs.get('saved_model_file', None)
 
         print("Using base index : {}".format(base_index_key))
         self.base_index_features = data_file[base_index_key]['features'].value
@@ -300,13 +228,29 @@ class IntegralImagesIndex:
         else:
             self.index_nn = None
 
+        if self.saved_model_file is not None:
+            if 'preprocessing' in data_file[base_index_key].keys():
+                self.preprocessing = pickle.loads(bytes(data_file[base_index_key]['preprocessing'].value))
+                assert isinstance(self.preprocessing, Pipeline)
+            else:
+                self.preprocessing = None
+            self.loaded_model = LoadedModel(tf.ConfigProto(device_count={'GPU': 0}),
+                                            self.saved_model_file,
+                                            input_mode="image")
+            self.loaded_model.__enter__()
+        else:
+            self.loaded_model = None
+
     def __repr__(self):
         return 'Index {} images, {}-d vectors, {} feature-maps'.format(len(self.base_index_inds_to_uids),
                                                                        self.base_index_features.shape[1],
                                                                        'with' if self.feature_maps else 'without')
 
+    def get_number_of_images(self) -> int:
+        return len(self.base_index_uids_to_inds)
+
     @classmethod
-    def build(cls, feature_generator, data_filename: str, save_feature_maps=False, append=False):
+    def build(cls, feature_generator, data_filename: str, save_feature_maps=False, append=False, saved_model_file=None):
         """
 
         :param feature_generator: a generator outputting dict(output=<visual_f>, feature_map=<feature_map>)
@@ -314,6 +258,8 @@ class IntegralImagesIndex:
         :return:
         """
         with File(data_filename, mode='a' if append else 'x') as data_file:
+            if saved_model_file is not None:
+                data_file.attrs['saved_model_file'] = saved_model_file
             if save_feature_maps:
                 feat_maps_group = data_file.require_group('feature_maps')
             else:
@@ -352,8 +298,9 @@ class IntegralImagesIndex:
             preprocessing_steps.append(('pre_normalize', Normalizer(norm='l2')))
             preprocessing_steps.append(("pca", PCA(n_components=base_features.shape[1] // 2)))
             preprocessing_steps.append(('post_normalize', Normalizer(norm='l2')))
+            preprocessing_pipeline = Pipeline(preprocessing_steps)
             # Transform
-            transformed_features = Pipeline(preprocessing_steps).fit_transform(base_features)
+            transformed_features = preprocessing_pipeline.fit_transform(base_features)
             # Save
             transformed_index = data_file.require_group(cls.IndexType.HALF_DIM_PCA)
             if 'features' in transformed_index:
@@ -362,6 +309,9 @@ class IntegralImagesIndex:
             if 'uids' in transformed_index:
                 del transformed_index['uids']
             transformed_index.create_dataset('uids', data=base_uids)
+            if 'preprocessing' in transformed_index:
+                del transformed_index['preprocessing']
+            transformed_index.create_dataset('preprocessing', data=np.void(pickle.dumps(preprocessing_pipeline)))
 
     def search(self, positive_ids: List[str], negative_ids: List[str],
                nb_results: int, filtered_ids=None) -> List[Tuple[str, float]]:
@@ -369,7 +319,7 @@ class IntegralImagesIndex:
         # print(positive_ids)
 
         if filtered_ids is not None and len(filtered_ids) > 0:
-            filtered_inds = [self.base_index_uids_to_inds[_id] for _id in filtered_ids + positive_ids + negative_ids
+            filtered_inds = [self.base_index_uids_to_inds[_id] for _id in set(filtered_ids + positive_ids + negative_ids)
                              if _id in self.base_index_uids_to_inds]
             features = self.base_index_features[filtered_inds]
             uid_list = self.base_index_inds_to_uids[filtered_inds]
@@ -392,6 +342,28 @@ class IntegralImagesIndex:
         results_ind = np.argsort(scores)[-1:-(min(nb_results, len(scores)) + 1):-1]
         return list(zip(uid_list[results_ind], scores[results_ind]))
 
+    def search_from_feature(self, query_feature: np.ndarray, nb_results: int, filtered_ids=None):
+        if filtered_ids is not None and len(filtered_ids) > 0:
+            filtered_inds = [self.base_index_uids_to_inds[_id] for _id in set(filtered_ids)
+                             if _id in self.base_index_uids_to_inds]
+            features = self.base_index_features[filtered_inds]
+            uid_list = self.base_index_inds_to_uids[filtered_inds]
+        else:
+            features = self.base_index_features
+            uid_list = self.base_index_inds_to_uids
+
+        scores = (features @ query_feature).astype(np.float64)
+
+        results_ind = np.argsort(scores)[-1:-(min(nb_results, len(scores)) + 1):-1]
+        return list(zip(uid_list[results_ind], scores[results_ind]))
+
+    def search_from_image(self, image_bytes: bytes, *args, **kwargs):
+        assert self.loaded_model is not None
+        feature_vector = self.loaded_model.predict(image_bytes)
+        if self.preprocessing is not None:
+            feature_vector = self.preprocessing.transform(feature_vector[None])[0]
+        return self.search_from_feature(feature_vector, *args, **kwargs)
+
     def search_one(self, positive_id: str, nb_results: int) -> List[Tuple[str, float]]:
         if self.index_nn is not None:
             results = self.index_nn.knnQuery(self._get_feature(positive_id), nb_results)
@@ -399,9 +371,14 @@ class IntegralImagesIndex:
         else:
             return self.search([positive_id], [], nb_results)
 
+    @lru_cache(maxsize=30000)
+    def get_compressed_feature_map(self, uuid) -> bytes:
+        assert self.feature_maps is not None, "Index does not contain feature maps"
+        return bytes(self.feature_maps[uuid].value)
+
     def get_feature_map(self, uuid):
         assert self.feature_maps is not None, "Index does not contain feature maps"
-        return decompress_sparse_data(bytes(self.feature_maps[uuid].value))
+        return decompress_sparse_data(self.get_compressed_feature_map(uuid))
 
     def _get_integral_image(self, uuid):
         assert self.feature_maps is not None, "Index does not contain feature maps"
@@ -500,7 +477,7 @@ class IntegralImagesIndex:
         :param method_params: dict of params (for instance {'post': 2} for hnsw)
         :return:
         """
-        results = self.find_closest_pairs(self.base_index_features, max_threshold, min_threshold, method, method_params)
+        results = self.find_closest_pairs(self.base_index_features, max_threshold, min_threshold, method=method, method_params=method_params)
 
         return sorted([(self.base_index_inds_to_uids[r[0]], self.base_index_inds_to_uids[r[1]], r[2]) for r in results],
                       key=lambda r: r[2])
@@ -519,7 +496,7 @@ class IntegralImagesIndex:
 
         features = np.stack([self._get_feature(uid) for uid in np.array(uids)[is_present]])
         distances_present = pairwise_distances(features, metric='euclidean')
-        if np.all(~is_present):
+        if np.all(is_present):
             return distances_present
         else:
             distances = np.ones([len(is_present), len(is_present)], dtype=distances_present.dtype)
@@ -529,21 +506,21 @@ class IntegralImagesIndex:
             distances[np.outer(is_present, is_present)] = distances_present.ravel()
             return distances
 
-    def match(self, uid1, uid2, return_plot=False, **kwargs):
+    def match(self, uid1, uid2, dataset=None, **kwargs):
         f_map_1 = self.get_feature_map(uid1)
-
         f_map_2 = self.get_feature_map(uid2)
 
-        num_matches, regressor, matchesMask = match_feature_maps(f_map_1, f_map_2, **kwargs)
+        num_matches, regressor, (src_pts, dst_pts), matchesMask, (box1, box2) = match_feature_maps(f_map_1, f_map_2, **kwargs)
 
-        if return_plot:
-            img1 = dataset.get_img(uid1)
-            img2 = dataset.get_img(uid2)
-            img1, img2 = resize(img1), resize(img2)
+        if dataset is not None:
+            img1 = dataset.get_img(uid1, max_dim=1024)
+            img2 = dataset.get_img(uid2, max_dim=1024)
+            h1, w1, _ = f_map_1.shape
+            h2, w2, _ = f_map_2.shape
 
             if regressor is not None:
-                m1 = np.min(src_pts[mask], axis=0)
-                m2 = np.max(src_pts[mask], axis=0)
+                m1 = np.min(src_pts[matchesMask], axis=0)
+                m2 = np.max(src_pts[matchesMask], axis=0)
                 pts = np.float32([[m1[0], m1[1]], [m1[0], m2[1]], [m2[0], m2[1]], [m2[0], m1[1]]])
                 dst = regressor.predict(pts)
 
@@ -556,9 +533,9 @@ class IntegralImagesIndex:
                                matchesMask=matchesMask,  # draw only inliers
                                flags=2)
             # print(kp1)
-            cv_kp1 = [cv2.KeyPoint(x, y, 20) for y, x in kp1 * np.array(img1.shape[:2]) / np.array([h1, w1])]
-            cv_kp2 = [cv2.KeyPoint(x, y, 20) for y, x in kp2 * np.array(img2.shape[:2]) / np.array([h2, w2])]
-            cv_matches = [cv2.DMatch(i, j, 0) for i, j in good]
+            cv_kp1 = [cv2.KeyPoint(x, y, 20) for y, x in src_pts * np.array(img1.shape[:2]) / np.array([h1, w1])]
+            cv_kp2 = [cv2.KeyPoint(x, y, 20) for y, x in dst_pts * np.array(img2.shape[:2]) / np.array([h2, w2])]
+            cv_matches = [cv2.DMatch(i, i, 0) for i in range(len(matchesMask))]
             img3 = cv2.drawMatches(img1, cv_kp1, img2, cv_kp2, cv_matches,
                                    None, **draw_params)
             return num_matches, img3
@@ -567,25 +544,47 @@ class IntegralImagesIndex:
 
     @staticmethod
     def _cnn_match_map_fn(pair, **kwargs):
-        f_map_1 = decompress_sparse_data(pair[0])
-        f_map_2 = decompress_sparse_data(pair[1])
-        n_matches, _, _, boxes = match_feature_maps(f_map_1, f_map_2, **kwargs)
+        with Timer("decompress", disable=True):
+            f_map_1 = decompress_sparse_data(pair[0])
+            f_map_2 = decompress_sparse_data(pair[1])
+        with Timer("matching", disable=True):
+            n_matches, _, _, _, boxes = match_feature_maps(f_map_1, f_map_2, **kwargs)
         return n_matches, boxes
 
     def many_cnn_matches(self, pairs, n_workers=12, print_progress=False, **kwargs):
-        binary_gen = ((bytes(self.feature_maps[uid1].value), bytes(self.feature_maps[uid2].value))
-                      for uid1, uid2 in pairs)
+        # Creates a generator reading the compressed version of the feature_maps
+        with Timer('Reading feature_maps', disable=True):
+            binary_gen = [(self.get_compressed_feature_map(uid1), self.get_compressed_feature_map(uid2))
+                          for uid1, uid2 in pairs]
 
-        results = []
-        with Pool(n_workers) as p:
-            for simple_result in tqdm(p.imap(partial(IntegralImagesIndex._cnn_match_map_fn, **kwargs), binary_gen,
-                                             chunksize=25), total=len(pairs), disable=not print_progress):
-                results.append(simple_result)
+        with Timer('Reranking Computation', disable=True):
+            results = []
+            #with Pool(n_workers) as p:
+            #    for simple_result in tqdm(p.imap(partial(IntegralImagesIndex._cnn_match_map_fn, **kwargs), binary_gen,
+            #                                     chunksize=20), total=len(pairs),
+            #                              disable=not print_progress):
+            #        results.append(simple_result)
+
+            with ThreadPoolExecutor(max_workers=n_workers) as e:
+                results = e.map(partial(IntegralImagesIndex._cnn_match_map_fn, **kwargs), binary_gen)
         return results
 
-    def search_with_cnn_reranking(self, uid, nb_results: int, rerank_N=1000, filtered_ids=None, candidates=None):
+    def search_with_cnn_reranking(self, uid, nb_results: int, rerank_N=1000, filtered_ids=None, candidates=None,
+                                  match_params=None):
         if candidates is None:
             candidates = [c[0] for c in self.search([uid], [], rerank_N, filtered_ids)]
-        results = self.many_cnn_matches([(uid, c) for c in candidates], n_workers=12)
+        results = self.many_cnn_matches([(uid, c) for c in candidates], n_workers=12,
+                                        **(match_params if match_params is not None else dict()))
         scores = [(c, r[0], r[1][1]) for c, r in zip(candidates, results)]
         return sorted(scores, key=lambda s: s[1], reverse=True)[:nb_results]
+
+    @staticmethod
+    def make_composed_search_function(base_index: 'IntegralImagesIndex', feature_map_index: 'IntegralImagesIndex',
+                                      rerank_n: int, match_params=None):
+        def _fn(uid: str, nb_results: int):
+            results = base_index.search_one(uid, max(nb_results, rerank_n))
+            reranked_results = feature_map_index.search_with_cnn_reranking(uid, nb_results,
+                                                                           candidates=[r[0] for r in results],
+                                                                           match_params=match_params)
+            return [t[:2] for t in reranked_results]
+        return _fn

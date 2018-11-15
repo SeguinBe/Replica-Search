@@ -1,5 +1,8 @@
 from .base import *
 from ..evaluation import Benchmark, TestQuery
+from collections import defaultdict
+from copy import deepcopy
+import networkx as nx
 
 
 class ConnectedDataset(Dataset):
@@ -16,25 +19,56 @@ class ConnectedDataset(Dataset):
         # Checks
         assert isinstance(self.connection_graph, nx.Graph)
         # Remove unknown edge type
+        to_be_removed = []
         for uid1, uid2, type in self.connection_graph.edges(data='type'):
             if type not in self.LinkType.ALL_TYPES:
-                self.connection_graph.remove_edge(uid1, uid2)
+                to_be_removed.append((uid1, uid2))
+        for t in to_be_removed:
+            self.connection_graph.remove_edge(*t)
 
         # Remove disconnected nodes
+        to_be_removed = []
         for n in self.connection_graph.nodes():
             if len(self.connection_graph[n]) == 0:
-                self.connection_graph.remove_node(n)
+                to_be_removed.append(n)
+        for n in to_be_removed:
+            self.connection_graph.remove_node(n)
 
         if drop_unknown_nodes:
-            dropped = 0
+            to_be_removed = []
             for uuid in self.connection_graph.nodes():
                 if uuid not in self.path_dict.keys():
-                    dropped += 1
-                    self.connection_graph.remove_node(uuid)
-            print('Dropped {} elements'.format(dropped))
+                    to_be_removed.append(uuid)
+            for n in to_be_removed:
+                self.connection_graph.remove_node(n)
+            print('Dropped {} elements'.format(len(to_be_removed)))
 
         for uuid in self.connection_graph:
             assert uuid in self.path_dict.keys(), uuid
+
+        physical_graph = self.connection_graph.edge_subgraph([(u, v)
+                                                              for u, v, d in self.connection_graph.edges(data='type')
+                                                              if d == 'DUPLICATE'])
+        self.physical_closure = {n: {n} for n in self.connection_graph.nodes()}
+        for p_g in nx.connected_components(physical_graph):
+            for n in p_g:
+                self.physical_closure[n] = p_g
+        self.to_be_ignored_dict = defaultdict(set)
+        # add the visual->physical connections
+        visual_graph = self.connection_graph.edge_subgraph([(u, v)
+                                                            for u, v, d in self.connection_graph.edges(data='type')
+                                                            if d == 'POSITIVE'])
+        for n in visual_graph.nodes():
+            neighbors = visual_graph.neighbors(n)
+            self.to_be_ignored_dict[n].update(self.physical_closure[n])
+            for nn in neighbors:
+                self.to_be_ignored_dict[n].update(self.physical_closure[nn])
+
+        # Expand to physical->visual->physical
+        tmp = deepcopy(self.to_be_ignored_dict)
+        for n, to_be_ignored_set in self.to_be_ignored_dict.items():
+            for nn in self.physical_closure[n]:
+                to_be_ignored_set.update(tmp[nn])
 
     def __repr__(self):
         return '{} | {} connections between {} elements'.format(super().__repr__(),
@@ -92,9 +126,10 @@ class ConnectedDataset(Dataset):
                 sampled_negatives.append((q_id, n_id, 0.))
         return sampled_negatives
 
-    def sample_triplets(self, search_function, n_triplets) -> List[Tuple[str, str, str]]:
+    def sample_triplets(self, search_function, n_triplets, margin=0.0) -> List[Tuple[str, str, str]]:
         queries = [n for n in self.connection_graph.nodes() if len([kk for kk, d in self.connection_graph[n].items()
-                                                                    if d['type'] == ConnectedDataset.LinkType.POSITIVE])>0]
+                                                                    if d[
+                                                                        'type'] == ConnectedDataset.LinkType.POSITIVE]) > 0]
         n_triplets_per_query = [len(a) for a in np.array_split(np.arange(n_triplets), len(queries))]
         assert sum(n_triplets_per_query) == n_triplets
         assert len(queries) == len(n_triplets_per_query)
@@ -106,20 +141,53 @@ class ConnectedDataset(Dataset):
                        if d['type'] == ConnectedDataset.LinkType.POSITIVE]
             if len(targets) == 0:
                 continue
-            forbidden = set(targets + [q_id])
-            for k in forbidden.copy():
-                forbidden.update([kk for kk, d in self.connection_graph[k].items()
-                                  if d['type'] == ConnectedDataset.LinkType.DUPLICATE])
+            forbidden = self.to_be_ignored_dict[q_id]
             # Search candidates
-            candidates = [r[0] for r in search_function(q_id, (len(forbidden) + 2*n_negatives))]
-            # Filter the ones which are not negatives
-            filtered_candidates = [c for c in candidates if c not in forbidden]
-            # Extend the list
-            if len(filtered_candidates) > 0:
-                for t_id, n_id in zip(np.random.choice(np.array(targets), n_negatives, replace=True),
-                                      np.random.choice(np.array(filtered_candidates), n_negatives, replace=False)):
-                    triplets.append((q_id, t_id, n_id))
+            candidates = search_function(q_id, max(len(forbidden) + 2 * n_negatives, 200))
+            candidate_uids, candidate_scores = [], []
+            targets_scores = {t_id: 0 for t_id in targets}
+            for uid, s in candidates:
+                if uid in targets:
+                    targets_scores[uid] = s
+                elif uid in forbidden:
+                    pass
+                else:
+                    candidate_uids.append(uid)
+                    candidate_scores.append(s)
+
+            # Mine hard negatives
+            candidate_uids = np.array(candidate_uids)
+            candidate_scores = np.array(candidate_scores)
+            query_triplets = []
+            for t_id, t_s in targets_scores.items():
+                t_candidates = candidate_uids[candidate_scores > t_s-2.0*margin]
+                if len(t_candidates) > 0:
+                    for n_id in np.random.choice(t_candidates, min(n_negatives, len(t_candidates)), replace=False):
+                        query_triplets.append((q_id, t_id, n_id))
+            if len(query_triplets) > n_negatives:
+                choices = np.random.choice(len(query_triplets), n_negatives)
+                query_triplets = [query_triplets[i] for i in choices]
+            triplets.extend(query_triplets)
         return triplets
+            # candidates = [r[0] for r in search_function(q_id, (len(forbidden) + 2 * n_negatives))]
+            # running_candidates = []
+            # for c in candidates:
+            #     if c in forbidden:
+            #         continue
+            #     elif c in targets:
+            #         for n_id in np.random.choice(np.array(running_candidates),
+            #                                      min(n_negatives, len(running_candidates)), replace=False):
+            #             triplets.append((q_id, c, n_id))
+            #     else:
+            #         running_candidates.append(c)
+            # # Filter the ones which are not negatives
+            # filtered_candidates = [c for c in candidates if c not in forbidden]
+            # # Extend the list
+            # if len(filtered_candidates) > 0:
+            #     for t_id, n_id in zip(np.random.choice(np.array(targets), n_negatives, replace=True),
+            #                           np.random.choice(np.array(filtered_candidates), n_negatives, replace=False)):
+            #         triplets.append((q_id, t_id, n_id))
+
 
 
 class BenchmarkGenerator:
@@ -130,16 +198,12 @@ class BenchmarkGenerator:
         benchmark = Benchmark()
 
         for n in dataset.connection_graph.nodes():
-            targets, to_ignore = [], []
+            targets, to_ignore = [], dataset.to_be_ignored_dict[n]
             for k, d in dataset.connection_graph[n].items():
                 if d['type'] == ConnectedDataset.LinkType.POSITIVE:
                     targets.append(k)
-                    to_ignore.extend([kk for kk, d in dataset.connection_graph[k].items()
-                                      if d['type'] == ConnectedDataset.LinkType.DUPLICATE])
-                elif d['type'] == ConnectedDataset.LinkType.DUPLICATE:
-                    to_ignore.append(k)
             if len(targets) > 0:
-                benchmark.add_query(TestQuery(n, targets, to_ignore, weight=1.))
+                benchmark.add_query(TestQuery(n, targets, to_ignore=to_ignore, weight=1.))
 
         return benchmark
 

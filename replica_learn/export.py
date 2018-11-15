@@ -154,7 +154,7 @@ def export_estimator(estimator, export_dir_base, preprocess_function, checkpoint
 
 
 class LoadedModel:
-    def __init__(self, config: tf.ConfigProto, model_dir: str):
+    def __init__(self, config: tf.ConfigProto, model_dir: str, input_mode='filename'):
         self.config = config
         elements_in_folder = os.listdir(model_dir)
         if 'saved_model.pb' not in elements_in_folder:
@@ -165,16 +165,22 @@ class LoadedModel:
             assert 'saved_model.pb' in os.listdir(self.model_dir)
         else:
             self.model_dir = model_dir
+        if input_mode == 'filename':
+            self.signature_def = 'predict_from_filenames'
+        elif input_mode == 'image':
+            self.signature_def = 'predict_from_encoded_images'
+        else:
+            raise NotImplementedError
         self.sess = None
 
     def __enter__(self):
         with tf.Graph().as_default():
             self.sess = tf.Session(config=self.config)
             loaded_model = tf.saved_model.loader.load(self.sess, ['predict'], self.model_dir)
-            self.inputs, self.outputs = signature_def_to_tensors(loaded_model.signature_def['predict_from_filenames'])
+            self.inputs, self.outputs = signature_def_to_tensors(loaded_model.signature_def[self.signature_def])
 
-    def predict(self, filename: str):
-        self.sess.run(self.outputs['output'][0], feed_dict={self.inputs['input']: [filename]})
+    def predict(self, input: str):
+        return self.sess.run(self.outputs['output'][0], feed_dict={self.inputs['input']: [input]})
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.sess.close()

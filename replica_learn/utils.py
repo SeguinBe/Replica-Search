@@ -84,3 +84,42 @@ def separate_links(links: List, proportion: float) -> (List[frozenset], List[fro
         else:
             output_2.extend(to_be_added_links)
     return output_1, output_2
+
+
+def create_graph_from_edges(links) -> nx.Graph:
+    """
+    Create a graph where two element of a given group are connected
+    :param groups:
+    :return:
+    """
+    g = nx.Graph()
+    for l in links:
+        g.add_edge(l['img1'], l['img2'], **dict(l))
+    return g
+
+
+def drop_duplicate_clusters(graph: nx.Graph):
+    sub_graphs = list(nx.connected_component_subgraphs(graph))
+    return nx.union_all([g for g in sub_graphs if any([d['type'] == 'POSITIVE'
+                                                       for _, _, d in g.edges(data=True)])])
+
+
+def separate_graph_into_subgraphs(graph: nx.Graph, proportion=0.8, verbose=True) -> (nx.Graph, nx.Graph):
+    """
+    Separate a graph into
+    :param graph: Incoming
+    :param proportion:
+    :return: big_sub_graph, small_sub_graph
+    """
+    assert 0 < proportion < 1
+    sub_graphs = list(nx.connected_component_subgraphs(graph))
+    print('subgraphs : {}'.format(len(sub_graphs)))
+    is_training = np.random.rand(len(sub_graphs)) < proportion
+    training_graph = nx.union_all([sub_g for i, sub_g in enumerate(sub_graphs) if is_training[i]])
+    validation_graph = nx.union_all([sub_g for i, sub_g in enumerate(sub_graphs) if not is_training[i]])
+    if verbose:
+        print("Asked proportion : {} | Actual proportion : {} ({}, {})".format(proportion,
+                                                                               len(training_graph)/len(graph),
+                                                                               len(training_graph),
+                                                                               len(validation_graph)))
+    return training_graph, validation_graph

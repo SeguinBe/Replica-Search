@@ -1,9 +1,11 @@
 import tensorflow as tf
 from replica_learn.export import StreamingModel, LoadedModel
+from replica_learn.evaluation import get_best_model_folder
+from replica_learn.utils import read_pickle
+from replica_learn.dataset import Dataset
 from replica_search.index import IntegralImagesIndex
 from replica_search.model import QueryIterator
 import argparse
-import app
 from glob import glob
 import os
 from tqdm import tqdm
@@ -19,6 +21,7 @@ if __name__ == '__main__':
                     help="Name of the created index file")
     ap.add_argument("-i", "--input-directory", required=False, help="Directory with the images, if not given uses the default database")
     ap.add_argument("--csv-file", required=False, help="Csv file with the images")
+    ap.add_argument("--dataset", required=False, help="Pickled dataset file with the images")
     ap.add_argument('--feature-maps', dest='feature_maps', action='store_true', help="Save the feature maps")
     ap.add_argument('--no-feature-maps', dest='feature_maps', action='store_false', help="Do not save the feature maps")
     ap.add_argument('--append', action='store_true', help="Append to index")
@@ -37,7 +40,16 @@ if __name__ == '__main__':
     else:
         skip_uids = set()
 
-    if args.get('input_directory') is None and args.get('csv_file') is None:
+    if args.get('input_directory'):
+        iterable = [(os.path.basename(f), f) for f in glob(args['input_directory'])]
+    elif args.get('csv_file'):
+        d = pd.read_csv(args['csv_file'])
+        iterable = list(zip(d.uid, d.path))
+    elif args.get('dataset'):
+        dataset = read_pickle(args['dataset'])
+        assert isinstance(dataset, Dataset)
+        iterable = list(dataset.path_dict.items())
+    else:
         def check_ratio_fn(l):
             p = l.get_image_path()
             img = Image.open(p)
@@ -55,29 +67,29 @@ if __name__ == '__main__':
                         '/mnt/project_replica/datasets/cini/40B/40B_176.jpg',  # Corrupted
                         '/mnt/project_replica/datasets/cini/64B/64B_715.jpg',  # Corrupted
                         '/mnt/project_replica/datasets/cini/90B/90B_401.jpg',  # Corrupted
+                        '/mnt/project_replica/datasets/cini/149C/149C_8.jpg',  # Corrupted
                      ]:
                 return False
             elif uid in skip_uids:
                 return False
             else:
                 return True
+        import app
         iterable = QueryIterator(app.Session().query(app.model.ImageLocation),
                                  fn=lambda l: (l.uid, l.get_image_path()))
         iterable = filter(filter_fn, iterable)
         iterable = list(iterable)
         print(iterable[:10])
-    elif args.get('input_directory'):
-        iterable = [(os.path.basename(f), f) for f in glob(args['input_directory'])]
-    elif args.get('csv_file'):
-        d = pd.read_csv(args['csv_file'])
-        iterable = list(zip(d.uid, d.path))
-    else:
-        raise NotImplementedError
+
+    if os.path.exists(os.path.join(MODEL_DIR, 'config.json')) and os.path.exists(os.path.join(MODEL_DIR, 'export')):
+        print("Getting the best validated model from {}".format(MODEL_DIR))
+        MODEL_DIR = get_best_model_folder(MODEL_DIR)
 
     loaded_model = StreamingModel(session_config, MODEL_DIR)
     with loaded_model:
         IntegralImagesIndex.build(loaded_model.output_generator_from_iterable(iterable),
-                                  INDEX_FILENAME, save_feature_maps=args['feature_maps'], append=args['append'])
+                                  INDEX_FILENAME, save_feature_maps=args['feature_maps'], append=args['append'],
+                                  saved_model_file=MODEL_DIR)
 
     print("Add secondary index")
     IntegralImagesIndex.add_transformed_index(INDEX_FILENAME)
