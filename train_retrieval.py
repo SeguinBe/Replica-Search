@@ -208,15 +208,15 @@ def experiment(model_name, training_dataset, validation_benchmark, testing_bench
             shuffle(training_examples)
             # Very important to avoid NaN in the training
             training_examples = [p for p in training_examples
-                                 if not np.allclose(last_index._get_feature(p[0]), last_index._get_feature(p[1]))]
+                                 if not np.allclose(last_index.get_feature_from_uuid(p[0]), last_index.get_feature_from_uuid(p[1]))]
         elif training_method == TrainingMethod.TRIPLET:
             training_examples = training_dataset.sample_triplets(search_function, 10000,
                                                                  margin=model_params['triplet_loss_margin'])
             shuffle(training_examples)
             # Very important to avoid NaN in the training
             training_examples = [p for p in training_examples
-                                 if not np.allclose(last_index._get_feature(p[0]), last_index._get_feature(p[1])) and
-                                 not np.allclose(last_index._get_feature(p[0]), last_index._get_feature(p[2]))]
+                                 if not np.allclose(last_index.get_feature_from_uuid(p[0]), last_index.get_feature_from_uuid(p[1])) and
+                                 not np.allclose(last_index.get_feature_from_uuid(p[0]), last_index.get_feature_from_uuid(p[2]))]
         else:
             raise NotImplementedError
         print("Generated {} training examples".format(len(training_examples)))

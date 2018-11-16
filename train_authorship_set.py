@@ -100,7 +100,7 @@ def experiment(model_name, author_csv, training_csv, validation_csv, testing_csv
 
         # Compute validation score
         validation_ids, labels = zip(*validation_dataset.generate_training_samples(id_only=True))
-        validation_elements = np.stack([validation_index._get_feature(uid) for uid in validation_ids])
+        validation_elements = np.stack([validation_index.get_feature_from_uuid(uid) for uid in validation_ids])
         estimator.evaluate(validation_input_fn(validation_elements, labels=labels))
 
         estimator.export_savedmodel(EXPORT_DIR,

@@ -173,19 +173,18 @@ def search_refine(integral_image, query_descriptor, best_window, rf_steps, rf_it
     return best_score, (y1, x1, y2, x2)
 
 
-def search_one_class_svm(search_inds, features: np.ndarray) -> np.ndarray:
-    training_features = features[search_inds]
+def search_one_class_svm(search_features: np.ndarray, features: np.ndarray) -> np.ndarray:
     model = svm.OneClassSVM(kernel='rbf', gamma=1)
-    model.fit(training_features)
+    model.fit(search_features)
     scores = model.decision_function(features)
     scores = scores.ravel()
     return scores
 
 
-def search_svm(search_inds, negative_inds, features: np.ndarray) -> np.ndarray:
-    y = np.zeros((len(search_inds) + len(negative_inds)))
-    y[range(len(search_inds))] = 1
-    training_features = np.vstack((features[search_inds], features[negative_inds]))
+def search_svm(search_features: np.ndarray, negative_features: np.ndarray, features: np.ndarray) -> np.ndarray:
+    y = np.zeros((len(search_features) + len(negative_features)))
+    y[range(len(search_features))] = 1
+    training_features = np.concatenate((search_features, negative_features), axis=0)
     model = svm.SVC(kernel='rbf', gamma=2)  # , class_weight={0: 1*len(search_inds)/float(len(negative_inds)),1: 1})
     model.fit(training_features, y)
     knowledge_model = svm.OneClassSVM()
@@ -318,31 +317,15 @@ class IntegralImagesIndex:
         # This part raises KeyError is elements not in the index
         # print(positive_ids)
 
-        if filtered_ids is not None and len(filtered_ids) > 0:
-            filtered_inds = [self.base_index_uids_to_inds[_id] for _id in set(filtered_ids + positive_ids + negative_ids)
-                             if _id in self.base_index_uids_to_inds]
-            features = self.base_index_features[filtered_inds]
-            uid_list = self.base_index_inds_to_uids[filtered_inds]
-            id_to_ind_dict = {uid: i for i, uid in enumerate(uid_list)}
+        positive_features = np.stack([self.get_feature_from_uuid(uid) for uid in positive_ids])
+        if len(negative_ids) > 0:
+            negative_features = np.stack([self.get_feature_from_uuid(uid) for uid in negative_ids])
         else:
-            features = self.base_index_features
-            uid_list = self.base_index_inds_to_uids
-            id_to_ind_dict = self.base_index_uids_to_inds
+            negative_features = np.zeros((0, positive_features.shape[1]), np.float32)
 
-        positive_inds = [id_to_ind_dict[_id] for _id in positive_ids]
-        negative_inds = [id_to_ind_dict[_id] for _id in negative_ids]
+        return self.search_from_features(positive_features, negative_features, nb_results, filtered_ids)
 
-        if len(negative_inds) > 0:
-            scores = search_svm(positive_inds, negative_inds, features)
-        elif len(positive_inds) == 1:
-            scores = (features @ features[positive_inds[0]])
-        else:
-            scores = search_one_class_svm(positive_inds, features)
-
-        results_ind = np.argsort(scores)[-1:-(min(nb_results, len(scores)) + 1):-1]
-        return list(zip(uid_list[results_ind], scores[results_ind]))
-
-    def search_from_feature(self, query_feature: np.ndarray, nb_results: int, filtered_ids=None):
+    def search_from_features(self, positive_features: np.ndarray, negative_features: np.ndarray, nb_results: int, filtered_ids=None):
         if filtered_ids is not None and len(filtered_ids) > 0:
             filtered_inds = [self.base_index_uids_to_inds[_id] for _id in set(filtered_ids)
                              if _id in self.base_index_uids_to_inds]
@@ -352,21 +335,25 @@ class IntegralImagesIndex:
             features = self.base_index_features
             uid_list = self.base_index_inds_to_uids
 
-        scores = (features @ query_feature).astype(np.float64)
+        if len(negative_features) > 0:
+            scores = search_svm(positive_features, negative_features, features)
+        elif len(positive_features) == 1:
+            scores = (features @ positive_features[0])
+        else:
+            scores = search_one_class_svm(positive_features, features)
 
         results_ind = np.argsort(scores)[-1:-(min(nb_results, len(scores)) + 1):-1]
-        return list(zip(uid_list[results_ind], scores[results_ind]))
+        return list(zip(uid_list[results_ind], scores[results_ind].astype(np.float64)))
 
     def search_from_image(self, image_bytes: bytes, *args, **kwargs):
-        assert self.loaded_model is not None
-        feature_vector = self.loaded_model.predict(image_bytes)
-        if self.preprocessing is not None:
-            feature_vector = self.preprocessing.transform(feature_vector[None])[0]
-        return self.search_from_feature(feature_vector, *args, **kwargs)
+        feature_vector = self.get_feature_from_image(image_bytes)
+        return self.search_from_features(feature_vector[None],
+                                         np.zeros((0, feature_vector.shape[0]), dtype=np.float32),
+                                         *args, **kwargs)
 
     def search_one(self, positive_id: str, nb_results: int) -> List[Tuple[str, float]]:
         if self.index_nn is not None:
-            results = self.index_nn.knnQuery(self._get_feature(positive_id), nb_results)
+            results = self.index_nn.knnQuery(self.get_feature_from_uuid(positive_id), nb_results)
             return [(self.base_index_inds_to_uids[r[0]], -r[1]) for r in zip(*results)]
         else:
             return self.search([positive_id], [], nb_results)
@@ -380,12 +367,29 @@ class IntegralImagesIndex:
         assert self.feature_maps is not None, "Index does not contain feature maps"
         return decompress_sparse_data(self.get_compressed_feature_map(uuid))
 
-    def _get_integral_image(self, uuid):
+    def _get_integral_image(self, uuid: str):
         assert self.feature_maps is not None, "Index does not contain feature maps"
         return make_integral_image(decompress_sparse_data(bytes(self.feature_maps[uuid].value)))
 
-    def _get_feature(self, uuid):
+    def get_feature_from_uuid(self, uuid: str) -> np.ndarray:
+        """
+
+        :param uuid: key of the feature to be retrieved
+        :return: a 1-D array of the corresponding feature
+        """
         return self.base_index_features[self.base_index_uids_to_inds[uuid]]
+
+    def get_feature_from_image(self, image_bytes: bytes) -> np.ndarray:
+        """
+
+        :param image_bytes: JPEG binary encoded image file
+        :return: a 1-D array of the corresponding feature
+        """
+        assert self.loaded_model is not None
+        feature_vector = self.loaded_model.predict(image_bytes)
+        if self.preprocessing is not None:
+            feature_vector = self.preprocessing.transform(feature_vector[None])[0]
+        return feature_vector.astype(np.float32)
 
     def search_region(self, positive_id: str, region: np.ndarray, nb_results: int,
                       rerank_N=1000, filtered_ids=None) -> List:
@@ -494,7 +498,7 @@ class IntegralImagesIndex:
     def make_distance_matrix(self, uids):
         is_present = np.array([uid in self.base_index_uids_to_inds.keys() for uid in uids], dtype=np.bool)
 
-        features = np.stack([self._get_feature(uid) for uid in np.array(uids)[is_present]])
+        features = np.stack([self.get_feature_from_uuid(uid) for uid in np.array(uids)[is_present]])
         distances_present = pairwise_distances(features, metric='euclidean')
         if np.all(is_present):
             return distances_present

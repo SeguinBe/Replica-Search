@@ -165,8 +165,10 @@ class GlobalStatistics(Resource):
 @api.route('/api/search')
 class SearchResource(Resource):
     parser = api.parser()
-    parser.add_argument('positive_image_uids', type=list, required=True, location='json')
+    parser.add_argument('positive_image_uids', type=list, default=[], location='json')
     parser.add_argument('negative_image_uids', type=list, default=[], location='json')
+    parser.add_argument('positive_images_b64', type=list, default=[], location='json')
+    parser.add_argument('negative_images_b64', type=list, default=[], location='json')
     parser.add_argument('nb_results', type=int, default=100)
     parser.add_argument('index', type=str, location='json')
     parser.add_argument('filtered_uids', type=list, default=[], location='json')
@@ -176,19 +178,38 @@ class SearchResource(Resource):
     def post(self):
         args = self.parser.parse_args()
 
-        print(args)
+        # print(args)
 
         @cache.memoize(timeout=CACHE_SEARCH_TIMEOUT, make_name='search')
         def _fn(args):
             search_index = get_search_index(args['index'], DEFAULT_ALGEBRAIC_SEARCH_INDEX_KEY)
-            if len(args['positive_image_uids']) == 0:
+
+            if len(args['positive_image_uids']) + len(args['positive_images_b64']) == 0:
                 return {'results': [], 'total': search_index.get_number_of_images()}
 
-            if len(args['positive_image_uids']) == 1 and len(args['negative_image_uids']) == 0 and args['rerank']:
-                results = search_index.search(args['positive_image_uids'],
-                                              args['negative_image_uids'],
-                                              max(1000, args['nb_results']),
-                                              args['filtered_uids'])
+            positive_features = np.stack(
+                [search_index.get_feature_from_uuid(uid) for uid in args['positive_image_uids']] +
+                [search_index.get_feature_from_image(base64.urlsafe_b64decode(img_b64.encode()))
+                 for img_b64 in args['positive_images_b64']]
+            )
+
+            if len(args['negative_image_uids']) + len(args['negative_images_b64']) > 0:
+                negative_features = np.stack(
+                    [search_index.get_feature_from_uuid(uid) for uid in args['negative_image_uids']] +
+                    [search_index.get_feature_from_image(base64.urlsafe_b64decode(img_b64.encode()))
+                     for img_b64 in args['negative_images_b64']]
+                )
+            else:
+                negative_features = np.zeros((0, positive_features.shape[1]), np.float32)
+
+            if len(positive_features) == 1 and len(args['positive_image_uids']) == 1 and len(args['negative_image_uids']) == 0 and args['rerank']:
+                # results = search_index.search(args['positive_image_uids'],
+                #                              args['negative_image_uids'],
+                #                              max(1000, args['nb_results']),
+                #                              args['filtered_uids'])
+                results = search_index.search_from_features(positive_features, negative_features,
+                                                            max(1000, args['nb_results']),
+                                                            args['filtered_uids'])
                 integral_index = get_search_index(args['index'], DEFAULT_REGION_SEARCH_INDEX_KEY)
                 results = integral_index.search_with_cnn_reranking(args['positive_image_uids'][0],
                                                                    args['nb_results'],
@@ -203,8 +224,11 @@ class SearchResource(Resource):
                     else integral_index.get_number_of_images()
                 }
             else:
-                results = search_index.search(args['positive_image_uids'], args['negative_image_uids'],
-                                              args['nb_results'], args['filtered_uids'])
+                #results = search_index.search(args['positive_image_uids'], args['negative_image_uids'],
+                #                              args['nb_results'], args['filtered_uids'])
+                results = search_index.search_from_features(positive_features, negative_features,
+                                                            args['nb_results'],
+                                                            args['filtered_uids'])
                 return {
                     'results': [
                         {'uid': uid, 'score': s} for uid, s in results
