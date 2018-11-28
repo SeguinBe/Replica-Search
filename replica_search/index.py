@@ -18,6 +18,7 @@ import nmslib
 import cv2
 from functools import partial, lru_cache
 import pickle
+import os
 
 from .compression import compress_sparse_data, decompress_sparse_data
 from .utils import Timer
@@ -234,7 +235,7 @@ class IntegralImagesIndex:
             else:
                 self.preprocessing = None
             self.loaded_model = LoadedModel(tf.ConfigProto(device_count={'GPU': 0}),
-                                            self.saved_model_file,
+                                            os.path.join(os.path.dirname(data_filename), self.saved_model_file),
                                             input_mode="image")
             self.loaded_model.__enter__()
         else:
