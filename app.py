@@ -36,7 +36,8 @@ DEFAULT_RESOLVER_KEY = 'default'
 
 for resolver_key, base_url, local_root_folder in app.config['LOCAL_RESOLVERS']:
     resolvers.LOCAL_RESOLVERS[resolver_key] = resolvers.LocalResolver(base_url, local_root_folder)
-resolvers.LOCAL_RESOLVERS[DEFAULT_RESOLVER_KEY] = resolvers.DefaultResolver(DEFAULT_LOCAL_IMAGES_FOLDER)
+if DEFAULT_LOCAL_IMAGES_FOLDER is not None:
+    resolvers.LOCAL_RESOLVERS[DEFAULT_RESOLVER_KEY] = resolvers.DefaultResolver(DEFAULT_LOCAL_IMAGES_FOLDER)
 RESIZING_MAX_DIM = 1024
 
 for resolver in resolvers.LOCAL_RESOLVERS.values():
