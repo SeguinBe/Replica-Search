@@ -52,7 +52,7 @@ def match_descriptors(kp1, des1, kp2, des2, ransac_thresholds: Union[float, Iter
             dst_pts = np.float32([kp2[n].pt for m, n in good]).reshape(-1, 1, 2)
 
             M, _ = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, ransac_threshold)
-            mask = np.less_equal(np.linalg.norm(dst_pts[:, 0, :] - cv2.perspectiveTransform(src_pts[:, 0, :], M), axis=1), ransac_threshold)
+            mask = np.less_equal(np.linalg.norm(dst_pts[:, 0, :] - cv2.perspectiveTransform(src_pts, M)[:, 0, :], axis=1), ransac_threshold)
             #mask = mask.astype(np.bool)
         else:
             # print("Not enough matches are found - %d/%d" % (len(good),MIN_MATCH_COUNT))
