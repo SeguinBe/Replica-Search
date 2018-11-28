@@ -30,7 +30,8 @@ engine = sqlalchemy.create_engine('sqlite:///' + app.config['SQLITE_FILE'],
 model.Base.metadata.create_all(engine)
 Session = scoped_session(sessionmaker(bind=engine))
 
-DEFAULT_LOCAL_IMAGES_FOLDER = '/scratch/benoit/replica_local_downloaded_images'
+# where to store downloaded added images, if None, is disabled
+DEFAULT_LOCAL_IMAGES_FOLDER = app.config['DEFAULT_LOCAL_IMAGES_FOLDER']
 DEFAULT_RESOLVER_KEY = 'default'
 
 for resolver_key, base_url, local_root_folder in app.config['LOCAL_RESOLVERS']:
@@ -83,6 +84,7 @@ class RegisterImageResource(Resource):
             # Needs to download the image to local storage
             resolver_key = DEFAULT_RESOLVER_KEY
             local_path = resolvers.generate_image_path(uid)
+            assert DEFAULT_LOCAL_IMAGES_FOLDER is not None, "Local storage capabilities not activated"
             output_path = os.path.join(DEFAULT_LOCAL_IMAGES_FOLDER, local_path)
             if args['overwrite'] or not os.path.exists(output_path):
                 w, h = iiif_server_answer['width'], iiif_server_answer['height']

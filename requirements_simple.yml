@@ -16,6 +16,7 @@ dependencies:
   - blosc
   - sqlalchemy
   - flask
+  - requests
   - pip:
     - flask-caching==1.4.0
     - flask-prometheus==0.0.1
